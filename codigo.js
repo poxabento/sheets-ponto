@@ -2,26 +2,31 @@
  * SISTEMA INTEGRADO DE CONTROLE DE PONTO E BANCO DE HORAS COM DASHBOARD
  * Jornada Padrão: 8h48min por dia útil (528 minutos)
  *
- * v3 — Melhorias sobre a v2:
- *  - Processa TODAS as abas de mês da planilha (não só a ativa), aplicando o
- *    mesmo cálculo e formatação em cada uma.
- *  - Aba "Feriados" (criada automaticamente) — datas nela contam como não-úteis,
- *    igual fim de semana, tanto no cálculo quanto na meta do dia.
- *  - Histórico mensal: gráfico comparando o saldo do banco de horas de cada
- *    aba/mês processada.
- *  - Alerta automático por e-mail quando o saldo do banco fica abaixo de um
- *    limite (padrão: -3h), no máximo uma vez por dia.
- *  - Seta de tendência no card do banco de horas (▲/▼) comparando o mês atual
- *    com a média dos meses anteriores.
+ * v4 — Melhorias sobre a v3:
+ *  - CORREÇÃO IMPORTANTE: o alerta por e-mail rodava ANTES de desenhar a
+ *    dashboard. Como gatilhos automáticos de edição (onEdit) não têm
+ *    permissão para usar MailApp, isso quebrava a execução e a dashboard
+ *    nunca era atualizada sozinha. Agora a dashboard sempre é desenhada
+ *    primeiro, e o alerta roda depois, dentro de um try/catch — se falhar
+ *    (por ser um gatilho automático sem permissão), a dashboard já foi
+ *    atualizada mesmo assim. O e-mail em si só sai com certeza quando você
+ *    roda algo pelo menu (que já é uma execução autorizada).
+ *  - onEdit agora detecta edições em bloco/colagens (olha a faixa inteira,
+ *    não só a primeira célula) e também recalcula quando você edita a aba
+ *    "Feriados".
+ *  - Visual: ícones nos títulos dos cards, e o histórico mensal agora usa
+ *    barras verdes (saldo positivo) e vermelhas (saldo negativo) em vez de
+ *    uma cor única.
  *
- * v2 já trazia: layout construído uma única vez (performance), gráfico de
+ * v3 trouxe: feriados, histórico entre todas as abas, alerta automático.
+ * v2 trouxe: layout construído uma única vez (performance), gráfico de
  * tendência do saldo diário, indicadores de projeção/médias.
  */
 
 const JORNADA_PADRAO_MINUTOS = (8 * 60) + 48; // 528 minutos / 8h48 por dia útil
 const NOME_ABA_DASHBOARD = "📊 Painel Geral";
 const NOME_ABA_FERIADOS = "Feriados";
-const MARCADOR_LAYOUT = "layoutV3";
+const MARCADOR_LAYOUT = "layoutV4";
 const MAX_DIAS_TENDENCIA = 31;
 const MAX_MESES_HISTORICO = 12;
 const LIMITE_ALERTA_SALDO_MIN = -180; // -3h — abaixo disso, dispara e-mail
@@ -222,7 +227,7 @@ function calcularResumoAba(sheet, feriados) {
     } else if (saldoDiaMin < 0) {
       faltaStr = minutosParaHorasFormatado(Math.abs(saldoDiaMin));
       resumo.totalFaltas += Math.abs(saldoDiaMin);
-      corI = ehFeriado ? "#fee2e2" : "#fee2e2";
+      corI = "#fee2e2";
     }
 
     matrizResultados.push([minutosParaHorasFormatado(minTrabalhados), hExtraStr, faltaStr]);
@@ -272,8 +277,10 @@ function processarTodasAsAbas() {
 }
 
 /**
- * Recalcula todas as abas, monta projeções para o mês atual, verifica o
- * alerta de saldo negativo e atualiza a Dashboard.
+ * Recalcula todas as abas, monta projeções para o mês atual e atualiza a
+ * Dashboard. A dashboard é SEMPRE desenhada — o alerta por e-mail roda
+ * depois, protegido por try/catch, então uma eventual falha de permissão
+ * (comum em gatilhos automáticos) nunca impede a atualização da tela.
  */
 function recalcularETrazerDetalhes(exibirAlerta = true) {
   const { resumoAtual, historico, abaAtiva } = processarTodasAsAbas();
@@ -294,8 +301,16 @@ function recalcularETrazerDetalhes(exibirAlerta = true) {
     resumoAtual.tendenciaVsHistorico = null;
   }
 
-  verificarEEnviarAlerta(resumoAtual);
+  // 1) Dashboard SEMPRE atualiza primeiro.
   renderizarDashboard(resumoAtual, historico, abaAtiva);
+
+  // 2) Alerta por e-mail é best-effort — nunca deve travar a atualização.
+  try {
+    verificarEEnviarAlerta(resumoAtual);
+  } catch (err) {
+    // Gatilhos automáticos (onEdit simples) não têm permissão para MailApp.
+    // O alerta será reenviado assim que algo for rodado pelo menu.
+  }
 
   if (exibirAlerta) {
     const saldoFinalStr = minutosParaHorasFormatado(resumoAtual.saldoBanco, true);
@@ -380,7 +395,7 @@ function construirLayoutBase(dash) {
   dash.setHiddenGridlines(true);
 
   const TOTAL_LINHAS = 70;
-  const TOTAL_COLUNAS = 27; // até AA — O em diante reservadas para dados dos gráficos
+  const TOTAL_COLUNAS = 28; // até AB — O em diante reservadas para dados dos gráficos
   if (dash.getMaxColumns() < TOTAL_COLUNAS) dash.insertColumnsAfter(dash.getMaxColumns(), TOTAL_COLUNAS - dash.getMaxColumns());
   if (dash.getMaxRows() < TOTAL_LINHAS) dash.insertRowsAfter(dash.getMaxRows(), TOTAL_LINHAS - dash.getMaxRows());
 
@@ -400,12 +415,14 @@ function construirLayoutBase(dash) {
   dash.setColumnWidth(12, 75); // L
   dash.setColumnWidth(13, 80); // M
 
+  dash.setRowHeight(2, 34);
+
   // --- CABEÇALHO ---
   dash.getRange("B2:M2").merge()
     .setBackground(PALETA.escuro).setFontColor("#FFFFFF").setFontFamily("Segoe UI")
-    .setFontSize(16).setFontWeight("bold").setHorizontalAlignment("center").setVerticalAlignment("middle")
+    .setFontSize(17).setFontWeight("bold").setHorizontalAlignment("center").setVerticalAlignment("middle")
     .setBorder(true, true, true, true, false, false, PALETA.escuro, SpreadsheetApp.BorderStyle.SOLID)
-    .setValue("CONTROLE DE PONTO & BANCO DE HORAS");
+    .setValue("⏰ CONTROLE DE PONTO & BANCO DE HORAS");
 
   dash.getRange("B3:M3").merge()
     .setBackground("#F8FAFC").setFontFamily("Segoe UI").setFontSize(9).setFontColor(PALETA.cinzaTexto)
@@ -420,15 +437,15 @@ function construirLayoutBase(dash) {
 
   // --- CARDS PRINCIPAIS ---
   construirEstruturaCard(dash, [
-    { cIni: 2, cFim: 4,  titulo: "HORAS TRABALHADAS" },
-    { cIni: 5, cFim: 7,  titulo: "BANCO DE HORAS" },
-    { cIni: 8, cFim: 10, titulo: "HORAS EXTRAS" },
-    { cIni: 11, cFim: 13, titulo: "ATRASOS / FALTAS" }
+    { cIni: 2, cFim: 4,  titulo: "⏱️ HORAS TRABALHADAS" },
+    { cIni: 5, cFim: 7,  titulo: "🏦 BANCO DE HORAS" },
+    { cIni: 8, cFim: 10, titulo: "➕ HORAS EXTRAS" },
+    { cIni: 11, cFim: 13, titulo: "➖ ATRASOS / FALTAS" }
   ], 5, PALETA.card);
 
   // --- BARRA DE PROGRESSO ---
   dash.getRange("B10:M10").merge()
-    .setFontFamily("Segoe UI").setFontSize(9).setFontWeight("bold").setFontColor(PALETA.escuro)
+    .setFontFamily("Segoe UI").setFontSize(10).setFontWeight("bold").setFontColor(PALETA.escuro)
     .setBackground(PALETA.card).setHorizontalAlignment("center").setVerticalAlignment("middle")
     .setBorder(true, true, true, true, false, false, PALETA.borda, SpreadsheetApp.BorderStyle.SOLID);
 
@@ -441,10 +458,10 @@ function construirLayoutBase(dash) {
 
   // --- MINI CARDS DE PROJEÇÃO ---
   construirEstruturaCard(dash, [
-    { cIni: 2, cFim: 4,  titulo: "DIAS ÚTEIS RESTANTES" },
-    { cIni: 5, cFim: 7,  titulo: "MÉDIA DIÁRIA TRABALHADA" },
-    { cIni: 8, cFim: 10, titulo: "AJUSTE NECESSÁRIO/DIA" },
-    { cIni: 11, cFim: 13, titulo: "PROJEÇÃO DE FECHAMENTO" }
+    { cIni: 2, cFim: 4,  titulo: "📆 DIAS ÚTEIS RESTANTES" },
+    { cIni: 5, cFim: 7,  titulo: "📊 MÉDIA DIÁRIA TRABALHADA" },
+    { cIni: 8, cFim: 10, titulo: "🎯 AJUSTE NECESSÁRIO/DIA" },
+    { cIni: 11, cFim: 13, titulo: "🔮 PROJEÇÃO DE FECHAMENTO" }
   ], 13, PALETA.cardAlt);
 
   // --- LABEL TENDÊNCIA DIÁRIA ---
@@ -482,8 +499,8 @@ function construirLayoutBase(dash) {
   dash.getRange("P1").setValue("Saldo Acumulado (h)");
   dash.getRange("R1:S5").setValues([["Categoria", "Horas"], ["Meta", 0], ["Trabalhadas", 0], ["Extras", 0], ["Faltas", 0]]);
   dash.getRange("U1:V4").setValues([["Tipo", "Horas"], ["Trabalhado", 0], ["Extras", 0], ["Faltas", 0]]);
-  dash.getRange("X1:Y1").setValues([["Mês", "Saldo (h)"]]);
-  dash.hideColumns(15, 11); // O até Y
+  dash.getRange("X1:Z1").setValues([["Mês", "Saldo Positivo (h)", "Saldo Negativo (h)"]]);
+  dash.hideColumns(15, 12); // O até Z
 
   // Gráfico de tendência diária (linha) — mês atual
   const graficoTendencia = dash.newChart().asLineChart()
@@ -503,18 +520,18 @@ function construirLayoutBase(dash) {
     .build();
   dash.insertChart(graficoTendencia);
 
-  // Gráfico de histórico mensal (barras) — todas as abas processadas
+  // Gráfico de histórico mensal (barras verde/vermelho) — todas as abas
   const graficoHistorico = dash.newChart().asColumnChart()
-    .addRange(dash.getRange(1, 24, MAX_MESES_HISTORICO + 1, 2))
+    .addRange(dash.getRange(1, 24, MAX_MESES_HISTORICO + 1, 3))
     .setPosition(37, 2, 0, 0)
     .setOption('title', 'Saldo do Banco de Horas por Mês')
     .setOption('titleTextStyle', { color: PALETA.escuro, fontSize: 11, bold: true })
-    .setOption('legend', { position: 'none' })
+    .setOption('legend', { position: 'bottom' })
     .setOption('backgroundColor', PALETA.card)
-    .setOption('series', { 0: { color: PALETA.indigo } })
+    .setOption('series', { 0: { color: PALETA.verde }, 1: { color: PALETA.vermelho } })
     .setOption('hAxis', { textStyle: { color: PALETA.cinzaTexto, fontSize: 9 } })
     .setOption('vAxis', { textStyle: { color: PALETA.cinzaTexto }, format: '#,##0.0"h"', gridlines: { color: PALETA.borda } })
-    .setOption('chartArea', { width: '85%', height: '68%' })
+    .setOption('chartArea', { width: '85%', height: '65%' })
     .setOption('width', 760).setOption('height', 280)
     .build();
   dash.insertChart(graficoHistorico);
@@ -591,8 +608,9 @@ function atualizarValoresDashboard(dash, resumo, historico, sheetAtual) {
 
   const setaTendencia = resumo.tendenciaVsHistorico === "melhor" ? " ▲"
     : (resumo.tendenciaVsHistorico === "pior" ? " ▼" : "");
-  const metaBanco = (saldoPositivo ? "Saldo positivo" : "Horas a pagar") +
-    (resumo.tendenciaVsHistorico ? `${setaTendencia} vs média histórica` : "");
+  const iconeStatus = saldoPositivo ? "🟢" : "🔴";
+  const metaBanco = `${iconeStatus} ${saldoPositivo ? "Saldo positivo" : "Horas a pagar"}` +
+    (resumo.tendenciaVsHistorico ? `${setaTendencia} vs média` : "");
 
   preencherValoresCard(dash, [
     { cIni: 2, valor: minutosParaHorasFormatado(resumo.totalTrabalhado) + "h", meta: `Meta: ${minutosParaHorasFormatado(metaMinutosMes)}h`, cor: PALETA.escuro },
@@ -615,8 +633,9 @@ function atualizarValoresDashboard(dash, resumo, historico, sheetAtual) {
   const perc = metaMinutosMes > 0 ? Math.min(100, Math.round((resumo.totalTrabalhado / metaMinutosMes) * 100)) : 0;
   const cheios = Math.round(perc / 10);
   const barraStr = "█".repeat(cheios) + "░".repeat(10 - cheios);
-  const statusTexto = perc >= 100 ? "META BATIDA" : "EM ANDAMENTO";
-  dash.getRange("B10").setValue(`JORNADA DO MÊS • [ ${barraStr} ] ${perc}% • ${statusTexto} • ${resumo.diasTrabalhados}/${resumo.diasUteis} dias úteis`);
+  const statusTexto = perc >= 100 ? "✅ META BATIDA" : "⏳ EM ANDAMENTO";
+  dash.getRange("B10").setValue(`JORNADA DO MÊS • [ ${barraStr} ] ${perc}% • ${statusTexto} • ${resumo.diasTrabalhados}/${resumo.diasUteis} dias úteis`)
+    .setFontColor(perc >= 100 ? PALETA.verde : PALETA.indigo);
 
   atualizarDadosGraficos(dash, resumo, historico);
 }
@@ -640,13 +659,15 @@ function atualizarDadosGraficos(dash, resumo, historico) {
   }
   dash.getRange(2, 15, MAX_DIAS_TENDENCIA, 2).setValues(linhasTendencia);
 
-  // Histórico mensal (todas as abas), em horas decimais
+  // Histórico mensal (todas as abas) — saldo positivo/negativo em colunas separadas
   let linhasHistorico = [];
   for (let i = 0; i < MAX_MESES_HISTORICO; i++) {
     const mes = historico[i];
-    linhasHistorico.push(mes ? [mes.nome, mes.saldoBanco / 60] : ["", null]);
+    if (!mes) { linhasHistorico.push(["", null, null]); continue; }
+    const saldoHoras = mes.saldoBanco / 60;
+    linhasHistorico.push([mes.nome, saldoHoras >= 0 ? saldoHoras : 0, saldoHoras < 0 ? saldoHoras : 0]);
   }
-  dash.getRange(2, 24, MAX_MESES_HISTORICO, 2).setValues(linhasHistorico);
+  dash.getRange(2, 24, MAX_MESES_HISTORICO, 3).setValues(linhasHistorico);
 
   // Comparativo (barras) — mês atual, em horas decimais
   dash.getRange("R2:S5").setValues([
@@ -735,14 +756,30 @@ function registrarPonto() {
   }
 }
 
+/**
+ * Gatilho automático de edição. Roda ao editar qualquer aba de mês (colunas
+ * A-F, linha 5 em diante — inclusive colagens que cubram várias células) ou
+ * a aba "Feriados". Ignora edições feitas na própria Dashboard.
+ */
 function onEdit(e) {
   if (!e) return;
   const range = e.range;
   const sheet = range.getSheet();
-  if (sheet.getName() === NOME_ABA_DASHBOARD || sheet.getName() === NOME_ABA_FERIADOS) return;
+  const nome = sheet.getName();
 
-  const col = range.getColumn();
-  if (range.getRow() >= 5 && col >= 3 && col <= 6) {
+  if (nome === NOME_ABA_DASHBOARD) return;
+
+  if (nome === NOME_ABA_FERIADOS) {
+    recalcularETrazerDetalhes(false);
+    return;
+  }
+
+  const colIni = range.getColumn();
+  const colFim = range.getLastColumn();
+  const linhaFim = range.getLastRow();
+  const tocouColunasDeHorario = colIni <= 6 && colFim >= 1; // A (data/dia) até F (saída 2)
+
+  if (linhaFim >= 5 && tocouColunasDeHorario) {
     recalcularETrazerDetalhes(false);
   }
 }
